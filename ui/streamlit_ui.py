@@ -1,12 +1,15 @@
 """
 Web arayüzü: Kullanıcıdan malzeme ve tercih alır, AI ile tarif önerir.
 """
+import sys
+import os
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 import streamlit as st
 
 from translator.translate import translate_tr_to_en
 from utils.helpers import clean_ingredient_input, normalize_preference
-from agent.recipe_agent import run_agent
+from agent.recipe_agent import run_agent_interactive
 
 def run_ui():
     st.set_page_config(page_title="🍽️ AI Yemek Asistanı")
@@ -35,9 +38,12 @@ def run_ui():
 
         # Agent'ı çalıştır
         with st.spinner("🧠 AI tarif öneriyor..."):
-            result = run_agent(ingredients_en, pref_en)
+            result = run_agent_interactive(ingredients_en, pref_en)
 
         # Sonuç
         st.success("🎉 Tarifleriniz hazır!")
         st.markdown("### 🍽️ Önerilen Tarifler:")
         st.markdown(result)
+
+if __name__ == "__main__":
+    run_ui()

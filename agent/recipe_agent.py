@@ -1,81 +1,121 @@
-"""
-OpenRouter destekli tarif üretici. Kullanıcının verdiği malzeme ve tercihe göre önce yemek önerir,
-ardından seçilen tarifin adım adım nasıl yapılacağını açıklar.
-"""
-
 import os
+import logging
 from openai import OpenAI
 from dotenv import load_dotenv
 from translator.translate import translate_en_to_tr
+from constants import MODEL_ID
+from agent.spoonacular_api import get_recipes_from_api, get_recipe_instructions
+from agent import spoonacular_api
+
 
 load_dotenv()
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY")
 )
 
-MODEL = "deepseek/deepseek-r1-0528:free"
+def get_recipe_list(ingredients: list[str], preference: str) -> str:
+    prompt = f"""
+You have these ingredients: {', '.join(ingredients)}.
+You want a {preference.lower()} dish.
+List ONLY the names of 3 meal suggestions I can make with them.
+No explanations, no details. One per line, numbered.
+""".strip()
+
+    try:
+        logging.info("Yemek listesi isteniyor (LLM)...")
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": "You are a helpful recipe suggester."},
+                {"role": "user", "content": prompt}
+            ],
+            extra_headers={
+                "HTTP-Referer": "https://github.com/ozgurberkeakyol/recipe_agent",
+                "X-Title": "recipe_agent"
+            },
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.error(f"Tarif listesi alınamadı (LLM): {e}")
+        return ""
+
+def ask_user_selection(options: list[str]) -> int:
+    while True:
+        selection = input("\nHangi tarifi detaylı istersiniz? (1 / 2 / 3): ").strip()
+        if selection in {"1", "2", "3"}:
+            return int(selection) - 1
+        print("️ Lütfen sadece 1, 2 veya 3 girin.")
+
+def get_recipe_instruction(recipe_name: str) -> str:
+    prompt = f"""
+Give step-by-step instructions for how to cook '{recipe_name}'.
+Don't repeat the title. Use numbered steps. Be clear and concise.
+Include approximate amounts or cooking times where possible.
+""".strip()
+
+    try:
+        logging.info(f"'{recipe_name}' tarifi detaylı isteniyor (LLM)...")
+        response = client.chat.completions.create(
+            model=MODEL_ID,
+            messages=[
+                {"role": "system", "content": "You are a professional chef."},
+                {"role": "user", "content": prompt}
+            ],
+            extra_headers={
+                "HTTP-Referer": "https://github.com/ozgurberkeakyol/recipe_agent",
+                "X-Title": "recipe_agent"
+            },
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logging.error(f"Tarif alınamadı (LLM): {e}")
+        return ""
 
 def run_agent_interactive(ingredients: list[str], preference: str) -> str:
-    """
-    Önce yemek önerilerini listeler, sonra kullanıcıdan seçim alır ve tarifi detaylı anlatır.
-    Çıktı Türkçe döner.
-    """
-    # 1. Tarif isimlerini al
-    query = f"You have these ingredients: {', '.join(ingredients)}. You want a {preference.lower()} dish. List 3 meal suggestions I can make with them. Only list names."
-
-    print(f"\n🔍 Agent Query (EN): {query}")
-
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "You are a professional recipe suggester."},
-            {"role": "user", "content": query}
-        ],
-        extra_headers={
-            "HTTP-Referer": "https://github.com/ozgurberkeakyol/recipe_agent",
-            "X-Title": "recipe_agent"
-        },
-        temperature=0.3
-    )
-
-    result_en = response.choices[0].message.content.strip()
-    print(f"\n🍽️ Sizin için önerilen tarifler (EN):\n{result_en}")
-
-    # Türkçeye çevirip göster
-    result_tr = translate_en_to_tr(result_en)
-    print(f"\n🍽️ Türkçe Çeviri:\n{result_tr}")
-
-    # 2. Kullanıcıdan seçim al
-    selection = input("\nHangi tarifi detaylı istersiniz? (1 / 2 / 3): ").strip()
-    if selection not in {"1", "2", "3"}:
-        return "Geçersiz seçim yapıldı. Lütfen sadece 1, 2 veya 3 girin."
-
-    # 3. Seçilen tarifin adını çöz
     try:
-        selected_line = result_en.splitlines()[int(selection) - 1]
-        selected_recipe_name = selected_line.split(". ", 1)[1].strip()
-    except:
-        return "Tarif adı çözümlenemedi."
+        # Öncelik Spoonacular API
+        recipes = get_recipes_from_api(ingredients, preference, number=3)
+        if not recipes:
+            raise ValueError("Boş liste")
 
-    # 4. Tarif detayı isteme
-    detail_prompt = f"How do I prepare '{selected_recipe_name}'? Give step-by-step cooking instructions. Don't repeat the title."
+        print("\n🍽️ Spoonacular'dan önerilen tarifler:")
+        for i, r in enumerate(recipes, 1):
+            print(f"{i}. {r['title']}")
 
-    detail_response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": "You are a professional chef."},
-            {"role": "user", "content": detail_prompt}
-        ],
-        extra_headers={
-            "HTTP-Referer": "https://github.com/ozgurberkeakyol/recipe_agent",
-            "X-Title": "recipe_agent"
-        },
-        temperature=0.3
-    )
+        selected_index = ask_user_selection(recipes)
+        selected_recipe = recipes[selected_index]
 
-    detail_en = detail_response.choices[0].message.content.strip()
-    detail_tr = translate_en_to_tr(detail_en)
+        detail_en = get_recipe_instructions(selected_recipe['id'])
+        detail_tr = translate_en_to_tr(detail_en)
 
-    return f"\n📝 **{selected_recipe_name}** için adım adım tarif:\n\n{detail_tr}"
+        return f"\n📝 **{selected_recipe['title']}** için adım adım tarif:\n\n{detail_tr}"
+
+    except Exception as e:
+        logging.warning(f"Spoonacular başarısız oldu, LLM'e geçiliyor: {e}")
+
+        result_en = get_recipe_list(ingredients, preference)
+        if not result_en:
+            return "Hem Spoonacular hem LLM başarısız oldu. Daha sonra tekrar deneyin."
+
+        print("\n🍽️ Sizin için önerilen tarifler (EN):\n" + result_en)
+        result_tr = translate_en_to_tr(result_en)
+        print("\n🍽️ Türkçe Çeviri:\n" + result_tr)
+
+        recipe_lines = result_en.splitlines()
+        selected_index = ask_user_selection(recipe_lines)
+
+        try:
+            selected_recipe = recipe_lines[selected_index].split(". ", 1)[1].strip()
+        except:
+            return "Tarif adı çözümlenemedi."
+
+        detail_en = get_recipe_instruction(selected_recipe)
+        detail_tr = translate_en_to_tr(detail_en)
+
+        return f"\n📝 **{selected_recipe}** için adım adım tarif:\n\n{detail_tr}"
